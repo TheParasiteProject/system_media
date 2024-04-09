@@ -33,11 +33,12 @@ static inline std::vector<std::string> audio_get_configuration_paths() {
     static const std::vector<std::string> paths = []() {
         char value[PROPERTY_VALUE_MAX] = {};
         if (property_get("ro.boot.product.vendor.sku", value, "") <= 0) {
-            return std::vector<std::string>({"/odm/etc", "/vendor/etc", "/system/etc"});
+            return std::vector<std::string>({"/odm/etc", "/vendor/etc/audio",
+                    "/vendor/etc", "/system/etc"});
         } else {
             return std::vector<std::string>({
                     "/odm/etc", std::string("/vendor/etc/audio/sku_") + value,
-                    "/vendor/etc", "/system/etc"});
+                    "/vendor/etc/audio", "/vendor/etc", "/system/etc"});
         }
     }();
     return paths;
