@@ -35,7 +35,7 @@ static inline std::vector<std::string> audio_get_configuration_paths() {
         bool va_aosp = property_get_bool("ro.vendor.qti.va_aosp.support", false);
         std::vector<std::string> ret;
         if (property_get("ro.boot.product.vendor.sku", value, "") <= 0) {
-            ret = std::vector<std::string>({"/odm/etc", "/vendor/etc", "/system/etc"});
+            ret = std::vector<std::string>({"/odm/etc", "/vendor/etc/audio", "/vendor/etc", "/system/etc"});
         } else {
             ret = std::vector<std::string>({
                     "/odm/etc",
