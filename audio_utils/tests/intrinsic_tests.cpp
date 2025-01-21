@@ -121,6 +121,19 @@ TYPED_TEST(IntrisicUtilsTest, vector_hw_ctor) {
     }
 }
 
+TYPED_TEST(IntrisicUtilsTest, vabs_constant) {
+    const TypeParam value(-3.125f);
+    const TypeParam result = veval([](auto v) { return std::abs(v); }, value);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vabs(value));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vabs_random) {
+    TypeParam value;
+    initUniform(value, kRangeMin, kRangeMax);
+    const TypeParam result = veval([](auto v) { return std::abs(v); }, value);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vabs(value));
+}
+
 TYPED_TEST(IntrisicUtilsTest, vadd_constant) {
     const TypeParam a(0.25f);
     const TypeParam b(0.5f);
@@ -158,6 +171,86 @@ TYPED_TEST(IntrisicUtilsTest, vld1) {
     using element_t = decltype(android::audio_utils::intrinsics::first_element_of(value));
     EXPECT_EQ(value, android::audio_utils::intrinsics::vld1<TypeParam>(
             reinterpret_cast<const element_t*>(&value)));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vmax_constant) {
+    const TypeParam a(0.25f);
+    const TypeParam b(0.5f);
+    const TypeParam result = veval(
+            [](auto x, auto y) { return std::max(x, y); }, a, b);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vmax(a, b));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vmax_random) {
+    TypeParam a, b;
+    initUniform(a, kRangeMin, kRangeMax);
+    initUniform(b, kRangeMin, kRangeMax);
+    const TypeParam result = veval(
+            [](auto x, auto y) { return std::max(x, y); }, a, b);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vmax(a, b));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vmaxv_random) {
+    TypeParam a;
+    initUniform(a, kRangeMin, kRangeMax);
+    using element_t = decltype(android::audio_utils::intrinsics::first_element_of(a));
+    element_t result = android::audio_utils::intrinsics::first_element_of(a);
+    android::audio_utils::intrinsics::vapply(
+            [&result] (element_t value) { result = std::max(result, value); }, a);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vmaxv(a));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vmax_random_scalar) {
+    TypeParam a;
+    initUniform(a, kRangeMin, kRangeMax);
+    using element_t = decltype(android::audio_utils::intrinsics::first_element_of(a));
+    const element_t scalar = 3.f;
+    TypeParam b(scalar);
+    const TypeParam result = veval(
+            [](auto x, auto y) { return std::max(x, y); }, a, b);
+    EXPECT_EQ(result, android::audio_utils::intrinsics::vmax(a, scalar));
+    EXPECT_EQ(result, android::audio_utils::intrinsics::vmax(scalar, a));
+    EXPECT_EQ(result, android::audio_utils::intrinsics::vmax(a, b));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vmin_constant) {
+    const TypeParam a(0.25f);
+    const TypeParam b(0.5f);
+    const TypeParam result = veval(
+            [](auto x, auto y) { return std::min(x, y); }, a, b);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vmin(a, b));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vmin_random) {
+    TypeParam a, b;
+    initUniform(a, kRangeMin, kRangeMax);
+    initUniform(b, kRangeMin, kRangeMax);
+    const TypeParam result = veval(
+            [](auto x, auto y) { return std::min(x, y); }, a, b);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vmin(a, b));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vminv_random) {
+    TypeParam a;
+    initUniform(a, kRangeMin, kRangeMax);
+    using element_t = decltype(android::audio_utils::intrinsics::first_element_of(a));
+    element_t result = android::audio_utils::intrinsics::first_element_of(a);
+    android::audio_utils::intrinsics::vapply(
+            [&result] (element_t value) { result = std::min(result, value); }, a);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vminv(a));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vmin_random_scalar) {
+    TypeParam a;
+    initUniform(a, kRangeMin, kRangeMax);
+    using element_t = decltype(android::audio_utils::intrinsics::first_element_of(a));
+    const element_t scalar = 3.f;
+    TypeParam b(scalar);
+    const TypeParam result = veval(
+            [](auto x, auto y) { return std::min(x, y); }, a, b);
+    EXPECT_EQ(result, android::audio_utils::intrinsics::vmin(a, scalar));
+    EXPECT_EQ(result, android::audio_utils::intrinsics::vmin(scalar, a));
+    EXPECT_EQ(result, android::audio_utils::intrinsics::vmin(a, b));
 }
 
 TYPED_TEST(IntrisicUtilsTest, vmla_constant) {
@@ -262,4 +355,33 @@ TYPED_TEST(IntrisicUtilsTest, vsub_random) {
     const TypeParam result = veval(
             [](auto x, auto y) { return x - y; }, a, b);
     EXPECT_EQ(result, android::audio_utils::intrinsics::vsub(a, b));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vclamp_constant) {
+    const TypeParam a(0.25f);
+    const TypeParam b(0.5f);
+    const TypeParam c(1.f);
+    const TypeParam result = veval(
+            [](auto x, auto y, auto z) { if (y > z) {
+                return std::min(std::max(x, y), z);  // undefined behavior, make defined.
+            } else {
+                return std::clamp(x, y, z);
+            }
+            }, a, b, c);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vclamp(a, b, c));
+}
+
+TYPED_TEST(IntrisicUtilsTest, vclamp_random) {
+    TypeParam a, b, c;
+    initUniform(a, kRangeMin, kRangeMax);
+    initUniform(b, kRangeMin, kRangeMax);
+    initUniform(c, kRangeMin, kRangeMax);
+    const TypeParam result = veval(
+            [](auto x, auto y, auto z) { if (y > z) {
+                return std::min(std::max(x, y), z);  // undefined behavior, make defined.
+            } else {
+                return std::clamp(x, y, z);
+            }
+            }, a, b, c);
+    ASSERT_EQ(result, android::audio_utils::intrinsics::vclamp(a, b, c));
 }

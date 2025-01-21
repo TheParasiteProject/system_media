@@ -83,6 +83,11 @@ concept is_array_like = requires(T a) {
     a[0];  // can index first element
 };
 
+template<typename F, typename T>
+concept takes_identical_parameter_pair_v = requires(F f, T a) {
+    f(a, a);
+};
+
 /**
  * Applies a functional or a constant to an intrinsic struct.
  *
@@ -1392,6 +1397,24 @@ inline auto implement_arg1v(const F& f, const FN1& fn1, const FN2& fn2, const FN
     }
 }
 
+template<typename T, typename F>
+inline T vdupn(F f);
+
+/**
+ * Invoke vector intrinsic with a vector argument T and a scalar argument S.
+ *
+ * If the vector intrinsic does not support vector-scalar operation, we dup the scalar
+ * argument.
+ */
+template <typename F, typename T, typename S>
+auto invoke_intrinsic_with_dup_as_needed(const F& f, T a, S b) {
+    if constexpr (takes_identical_parameter_pair_v<F, T>) {
+        return f(a, vdupn<T>(b));
+    } else /* constexpr */ {
+        return f(a, b);
+    }
+}
+
 // arg2 with a vector and scalar parameter.
 template<typename F, typename FN1, typename FN2, typename FN3, typename T, typename S>
 inline auto implement_arg2(const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a, S b) {
@@ -1405,12 +1428,12 @@ inline auto implement_arg2(const F& f, const FN1& fn1, const FN2& fn2, const FN3
         // handle the lane variant
 #ifdef USE_NEON
         if constexpr (std::is_same_v<T, float32x2_t>) {
-            return fn1(a, b);
+            return invoke_intrinsic_with_dup_as_needed(fn1, a, b);
         } else if constexpr (std::is_same_v<T, float32x4_t>) {
-            return fn2(a, b);
+            return invoke_intrinsic_with_dup_as_needed(fn2, a, b);
 #if defined(__aarch64__)
         } else if constexpr (std::is_same_v<T, float64x2_t>) {
-            return fn3(a, b);
+            return invoke_intrinsic_with_dup_as_needed(fn3, a, b);
 #endif
         } else
 #endif // USE_NEON
@@ -1579,6 +1602,13 @@ inline T implement_arg3(
     }
 }
 
+// absolute value
+template<typename T>
+static inline T vabs(T a) {
+    return implement_arg1([](const auto& x) { return std::abs(x); },
+            DN_(vabs_f32), DN_(vabsq_f32), DN64_(vabsq_f64), a);
+}
+
 template<typename T>
 inline T vadd(T a, T b) {
     return implement_arg2([](const auto& x, const auto& y) { return x + y; },
@@ -1668,6 +1698,42 @@ static inline T vld1(const F *f) {
              return ret;
         }
     }
+}
+
+template<typename T, typename F>
+inline auto vmax(T a, F b) {
+    return implement_arg2([](const auto& x, const auto& y) { return std::max(x, y); },
+            DN_(vmax_f32), DN_(vmaxq_f32), DN64_(vmaxq_f64), a, b);
+}
+
+template<typename T>
+inline T vmax(T a, T b) {
+    return implement_arg2([](const auto& x, const auto& y) { return std::max(x, y); },
+            DN_(vmax_f32), DN_(vmaxq_f32), DN64_(vmaxq_f64), a, b);
+}
+
+template<typename T>
+inline auto vmaxv(const T& a) {
+    return implement_arg1v([](const auto& x, const auto& y) { return std::max(x, y); },
+            DN64_(vmaxv_f32), DN64_(vmaxvq_f32), DN64_(vmaxvq_f64), a);
+}
+
+template<typename T, typename F>
+inline auto vmin(T a, F b) {
+    return implement_arg2([](const auto& x, const auto& y) { return std::min(x, y); },
+            DN_(vmin_f32), DN_(vminq_f32), DN64_(vminq_f64), a, b);
+}
+
+template<typename T>
+inline T vmin(T a, T b) {
+    return implement_arg2([](const auto& x, const auto& y) { return std::min(x, y); },
+            DN_(vmin_f32), DN_(vminq_f32), DN64_(vminq_f64), a, b);
+}
+
+template<typename T>
+inline auto vminv(const T& a) {
+    return implement_arg1v([](const auto& x, const auto& y) { return std::min(x, y); },
+            DN64_(vminv_f32), DN64_(vminvq_f32), DN64_(vminvq_f64), a);
 }
 
 /**
@@ -1765,6 +1831,16 @@ template<typename T>
 inline T vsub(T a, T b) {
     return implement_arg2([](const auto& x, const auto& y) { return x - y; },
             DN_(vsub_f32), DN_(vsubq_f32), DN64_(vsubq_f64), a, b);
+}
+
+// Derived methods
+
+/**
+ * Clamps a value between the specified min and max.
+ */
+template<typename T, typename S, typename R>
+static inline T vclamp(const T& value, const S& min_value, const R& max_value) {
+    return vmin(vmax(value, min_value), max_value);
 }
 
 } // namespace android::audio_utils::intrinsics
