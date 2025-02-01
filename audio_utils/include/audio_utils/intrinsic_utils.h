@@ -834,6 +834,7 @@ template<typename T, size_t N>
 struct internal_array_t {
     T v[N];
     static constexpr size_t size() { return N; }
+    using element_t = T;
     constexpr bool operator==(const internal_array_t<T, N> other) const {
         for (size_t i = 0; i < N; ++i) {
             if (v[i] != other.v[i]) return false;
@@ -932,6 +933,189 @@ constexpr inline S vconvert(const T& in) {
   using alternative_9_t = struct { struct { float32x4x2_t a; float b; } s; };
   using alternative_15_t = struct { struct { float32x4x2_t a; struct { float v[7]; } b; } s; };
 */
+
+#ifdef USE_NEON
+
+// This will be specialized later to hold different types.
+template<int N>
+struct vfloat_struct {};
+
+// Helper method to extract type contained in the struct.
+template<int N>
+using vfloat_t = typename vfloat_struct<N>::t;
+
+// Create vfloat_extended_t to add helper methods.
+//
+// It is preferable to use vector_hw_t instead, which
+// chooses between vfloat_extended_t and internal_array_t
+// based on type support.
+//
+// Note: Adding helper methods will not affect std::is_trivially_copyable_v.
+template<size_t N>
+struct vfloat_extended_t : public vfloat_t<N> {
+    static constexpr size_t size() { return N; }
+    using element_t = float;
+    constexpr bool operator==(const vfloat_extended_t<N>& other) const {
+        return veq(*this, other);
+    }
+    vfloat_extended_t<N>& operator=(float value) {
+        vapply(value, *this);
+        return *this;
+    }
+    constexpr vfloat_extended_t(const vfloat_extended_t<N>& other) = default;
+    vfloat_extended_t() = default;
+    // explicit: disallow vfloat_extended_t<float, 3> x  = 10.f;
+    explicit vfloat_extended_t(float value) {
+        *this = value;
+    }
+    // allow internal_array_t<float, 3> x  = { 10.f };
+    vfloat_extended_t(std::initializer_list<float> value) {
+        size_t i = 0;
+        auto vptr = value.begin();
+        float v[N];
+        for (; i < std::min(N, value.size()); ++i) {
+            v[i] = *vptr++;
+        }
+        for (; i < N; ++i) {
+            v[i] = {};
+        }
+        static_assert(sizeof(*this) == sizeof(v));
+        static_assert(sizeof(*this) == N * sizeof(float));
+        memcpy(this, v, sizeof(*this));
+    }
+    vfloat_extended_t(internal_array_t<float, N> value) {
+        static_assert(sizeof(*this) == sizeof(value.v));
+        static_assert(sizeof(*this) == N * sizeof(float));
+        memcpy(this, value.v, sizeof(*this));
+    }
+};
+
+// Create type alias vector_hw_t as platform independent SIMD intrinsic
+// type for hardware support.
+
+template<typename F, size_t N>
+using vector_hw_t = std::conditional_t<
+        std::is_same_v<F, float>, vfloat_extended_t<N>, internal_array_t<F, N>>;
+
+// Recursively define structs containing the NEON intrinsic types for a given vector size.
+// intrinsic_utils.h allows structurally recursive type definitions based on
+// pairs of types (much like Lisp list cons pairs).
+//
+// For unpacking these type pairs, we use structured binding, so the naming of the
+// element members is irrelevant.  Hence, it is possible to use pragma pack and
+// std::pair<> to define these structs as follows:
+//
+// #pragma pack(push, 1)
+// struct vfloat_struct<3> { using t = struct {
+//     std::pair<vfloat_t<2>, vfloat_t<1>> p; }; };
+// #pragma pack(pop)
+//
+// But due to ctor requirements, the resulting struct composed of std::pair is
+// no longer considered trivially copyable.
+//
+template<>
+struct vfloat_struct<1> { using t = struct { float v[1]; }; };
+template<>
+struct vfloat_struct<2> { using t = struct { float32x2_t v[1]; }; };
+template<>
+struct vfloat_struct<3> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<2> a; vfloat_t<1> b; } s; }; };
+template<>
+struct vfloat_struct<4> { using t = struct { float32x4_t v[1]; }; };
+template<>
+struct vfloat_struct<5> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<4> a; vfloat_t<1> b; } s; }; };
+template<>
+struct vfloat_struct<6> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<4> a; vfloat_t<2> b; } s; }; };
+template<>
+struct vfloat_struct<7> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<4> a; vfloat_t<3> b; } s; }; };
+template<>
+struct vfloat_struct<8> { using t = float32x4x2_t; };
+template<>
+struct vfloat_struct<9> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<8> a; vfloat_t<1> b; } s; }; };
+template<>
+struct vfloat_struct<10> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<8> a; vfloat_t<2> b; } s; }; };
+template<>
+struct vfloat_struct<11> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<8> a; vfloat_t<3> b; } s; }; };
+template<>
+struct vfloat_struct<12> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<8> a; vfloat_t<4> b; } s; }; };
+template<>
+struct vfloat_struct<13> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<8> a; vfloat_t<5> b; } s; }; };
+template<>
+struct vfloat_struct<14> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<8> a; vfloat_t<6> b; } s; }; };
+template<>
+struct vfloat_struct<15> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<8> a; vfloat_t<7> b; } s; }; };
+template<>
+struct vfloat_struct<16> { using t = float32x4x4_t; };
+template<>
+struct vfloat_struct<17> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<1> b; } s; }; };
+template<>
+struct vfloat_struct<18> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<2> b; } s; }; };
+template<>
+struct vfloat_struct<19> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<3> b; } s; }; };
+template<>
+struct vfloat_struct<20> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<4> b; } s; }; };
+template<>
+struct vfloat_struct<21> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<5> b; } s; }; };
+template<>
+struct vfloat_struct<22> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<6> b; } s; }; };
+template<>
+struct vfloat_struct<23> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<7> b; } s; }; };
+template<>
+struct vfloat_struct<24> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<8> b; } s; }; };
+template<>
+struct vfloat_struct<25> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<9> b; } s; }; };
+template<>
+struct vfloat_struct<26> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<10> b; } s; }; };
+template<>
+struct vfloat_struct<27> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<11> b; } s; }; };
+template<>
+struct vfloat_struct<28> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<12> b; } s; }; };
+template<>
+struct vfloat_struct<29> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<13> b; } s; }; };
+template<>
+struct vfloat_struct<30> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<14> b; } s; }; };
+template<>
+struct vfloat_struct<31> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<15> b; } s; }; };
+template<>
+struct vfloat_struct<32> { using t = struct { struct __attribute__((packed)) {
+    vfloat_t<16> a; vfloat_t<16> b; } s; }; };
+
+// assert our structs are trivially copyable so we can use memcpy freely.
+static_assert(std::is_trivially_copyable_v<vfloat_struct<31>>);
+static_assert(std::is_trivially_copyable_v<vfloat_t<31>>);
+
+#else
+
+// x64 or risc-v, use loop vectorization if no HW type exists.
+template<typename F, int N>
+using vector_hw_t = internal_array_t<F, N>;
+
+#endif // USE_NEON
 
 /**
  * Returns the first element of the intrinsic struct.
@@ -1059,6 +1243,39 @@ constexpr V veval(const F& f, const V& v1, const V& v2, const V& v3) {
              r1 = veval(f, p11, p21, p31);
              r2 = veval(f, p12, p22, p32);
              return ret;
+        }
+    }
+}
+
+/**
+ * Compare two intrinsic structs and return true iff equal.
+ *
+ * As opposed to memcmp, this handles floating point equality
+ * which is different due to signed 0 and NaN, etc.
+ */
+template<typename T>
+inline bool veq(T a, T b) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+        return a == b;
+    } else if constexpr (is_array_like<T>) {
+#pragma unroll
+        for (size_t i = 0; i < sizeof(a) / sizeof(a[0]); ++i) {
+            if (!veq(a[i], b[i])) return false;
+        }
+        return true;
+    } else /* constexpr */ {
+        const auto& [aval] = a;
+        const auto& [bval] = b;
+        if constexpr (std::is_array_v<decltype(aval)>) {
+#pragma unroll
+            for (size_t i = 0; i < std::size(aval); ++i) {
+                if (!veq(aval[i], bval[i])) return false;
+            }
+            return true;
+        } else /* constexpr */ {
+             const auto& [a1, a2] = aval;
+             const auto& [b1, b2] = bval;
+             return veq(a1, b1) && veq(a2, b2);
         }
     }
 }

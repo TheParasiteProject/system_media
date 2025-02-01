@@ -65,6 +65,33 @@ static_assert(android::audio_utils::intrinsics::internal_array_t<float, 3>(3) ==
            vapply(3, temp);
            return temp; }());
 
+TEST(IntrisicUtilsTest, vector_hw_ctor_compatibility) {
+    const android::audio_utils::intrinsics::vector_hw_t<float, 3> a{ 1, 2, 3 };
+    const android::audio_utils::intrinsics::vector_hw_t<float, 3> b(
+        android::audio_utils::intrinsics::internal_array_t<float, 3>{ 1, 2, 3 });
+    const android::audio_utils::intrinsics::vector_hw_t<float, 3> c(
+        android::audio_utils::intrinsics::internal_array_t<float, 3>{ 1, 2, 2 });
+    EXPECT_TRUE(android::audio_utils::intrinsics::veq(a, b));
+    EXPECT_FALSE(android::audio_utils::intrinsics::veq(a, c));
+}
+
+TEST(IntrisicUtilsTest, veq_nan) {
+    const android::audio_utils::intrinsics::vector_hw_t<float, 3> a(std::nanf(""));
+    EXPECT_EQ(0, std::memcmp(&a, &a, sizeof(a)));  // bitwise equal.
+    EXPECT_FALSE(android::audio_utils::intrinsics::veq(a, a));  // logically nan is not.
+}
+
+TEST(IntrisicUtilsTest, veq_zero) {
+    int32_t neg = 0x8000'0000;
+    int32_t pos = 0;
+    float negzero, poszero;
+    memcpy(&negzero, &neg, sizeof(neg));  // float negative zero.
+    memcpy(&poszero, &pos, sizeof(pos));  // float positive zero.
+    const android::audio_utils::intrinsics::vector_hw_t<float, 3> a(negzero);
+    const android::audio_utils::intrinsics::vector_hw_t<float, 3> b(poszero);
+    EXPECT_NE(0, std::memcmp(&a, &b, sizeof(a)));  // bitwise not-equal.
+    EXPECT_TRUE(android::audio_utils::intrinsics::veq(a, b));  // logically equal.
+}
 
 template <typename D>
 class IntrisicUtilsTest : public ::testing::Test {
@@ -74,9 +101,24 @@ class IntrisicUtilsTest : public ::testing::Test {
 using FloatTypes = ::testing::Types<float, double,
         android::audio_utils::intrinsics::internal_array_t<float, kStandardSize>,
         android::audio_utils::intrinsics::internal_array_t<float, 1>,
-        android::audio_utils::intrinsics::internal_array_t<double, kStandardSize>
+        android::audio_utils::intrinsics::internal_array_t<double, kStandardSize>,
+        android::audio_utils::intrinsics::vector_hw_t<float, kStandardSize>,
+        android::audio_utils::intrinsics::vector_hw_t<float, 1>,
+        android::audio_utils::intrinsics::vector_hw_t<float, 2>,
+        android::audio_utils::intrinsics::vector_hw_t<float, 4>,
+        android::audio_utils::intrinsics::vector_hw_t<float, 7>,
+        android::audio_utils::intrinsics::vector_hw_t<float, 15>
         >;
 TYPED_TEST_CASE(IntrisicUtilsTest, FloatTypes);
+
+TYPED_TEST(IntrisicUtilsTest, vector_hw_ctor) {
+    if constexpr (!std::is_arithmetic_v<TypeParam>) {
+        if constexpr(std::is_same_v<float, typename TypeParam::element_t>) {
+            android::audio_utils::intrinsics::vector_hw_t<float, TypeParam::size()>
+                    a(TypeParam(0.5));
+        }
+    }
+}
 
 TYPED_TEST(IntrisicUtilsTest, vadd_constant) {
     const TypeParam a(0.25f);
