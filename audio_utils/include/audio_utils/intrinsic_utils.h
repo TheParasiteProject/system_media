@@ -1349,6 +1349,96 @@ inline T implement_arg1(const F& f, const FN1& fn1, const FN2& fn2, const FN3& f
 }
 
 template<typename F, typename FN1, typename FN2, typename FN3, typename T>
+inline auto implement_arg1v(const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+        return a;
+
+#if defined(USE_NEON) && defined(__aarch64__)
+    } else if constexpr (std::is_same_v<T, float32x2_t>) {
+        return fn1(a);
+    } else if constexpr (std::is_same_v<T, float32x4_t>) {
+        return fn2(a);
+    } else if constexpr (std::is_same_v<T, float64x2_t>) {
+        return fn3(a);
+#endif // defined(USE_NEON) && defined(__aarch64__)
+    } else if constexpr (is_array_like<T>) {
+        using ret_t = std::decay_t<decltype(a[0])>;
+
+        ret_t ret = a[0];
+        // array_like is not the same as an array, so we use sizeof here
+        // to handle neon instrinsics.
+#pragma unroll
+        for (size_t i = 1; i < sizeof(a) / sizeof(a[0]); ++i) {
+            ret = f(ret, a[i]);
+        }
+        return ret;
+    } else /* constexpr */ {
+        const auto &[aval] = a;
+        if constexpr (std::is_array_v<decltype(aval)>) {
+            using ret_t = std::decay_t<decltype(first_element_of(aval[0]))>;
+            ret_t ret = implement_arg1v(f, fn1, fn2, fn3, aval[0]);
+#pragma unroll
+            for (size_t i = 1; i < std::size(aval); ++i) {
+                ret = f(ret, implement_arg1v(f, fn1, fn2, fn3, aval[i]));
+            }
+            return ret;
+        } else /* constexpr */ {
+             using ret_t = std::decay_t<decltype(first_element_of(a))>;
+             const auto& [a1, a2] = aval;
+             ret_t ret = implement_arg1v(f, fn1, fn2, fn3, a1);
+             ret = f(ret, implement_arg1v(f, fn1, fn2, fn3, a2));
+             return ret;
+        }
+    }
+}
+
+// arg2 with a vector and scalar parameter.
+template<typename F, typename FN1, typename FN2, typename FN3, typename T, typename S>
+inline auto implement_arg2(const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a, S b) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+        if constexpr (std::is_same_v<S, float> || std::is_same_v<S, double>) {
+            return f(a, b);
+        } else /* constexpr */ {
+            return implement_arg2(f, fn1, fn2, fn3, b, a); // we prefer T to be the vector/struct.
+        }
+    } else if constexpr (std::is_same_v<S, float> || std::is_same_v<S, double>) {
+        // handle the lane variant
+#ifdef USE_NEON
+        if constexpr (std::is_same_v<T, float32x2_t>) {
+            return fn1(a, b);
+        } else if constexpr (std::is_same_v<T, float32x4_t>) {
+            return fn2(a, b);
+#if defined(__aarch64__)
+        } else if constexpr (std::is_same_v<T, float64x2_t>) {
+            return fn3(a, b);
+#endif
+        } else
+#endif // USE_NEON
+        {
+        T ret;
+        auto &[retval] = ret;  // single-member struct
+        const auto &[aval] = a;
+        if constexpr (std::is_array_v<decltype(retval)>) {
+#pragma unroll
+            for (size_t i = 0; i < std::size(aval); ++i) {
+                retval[i] = implement_arg2(f, fn1, fn2, fn3, aval[i], b);
+            }
+            return ret;
+        } else /* constexpr */ {
+             auto& [r1, r2] = retval;
+             const auto& [a1, a2] = aval;
+             r1 = implement_arg2(f, fn1, fn2, fn3, a1, b);
+             r2 = implement_arg2(f, fn1, fn2, fn3, a2, b);
+             return ret;
+        }
+        }
+    } else {
+        // Both types T and S are non-primitive and they are not equal.
+        static_assert(dependent_false_v<T>);
+    }
+}
+
+template<typename F, typename FN1, typename FN2, typename FN3, typename T>
 inline T implement_arg2(const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a, T b) {
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
         return f(a, b);
@@ -1383,6 +1473,68 @@ inline T implement_arg2(const F& f, const FN1& fn1, const FN2& fn2, const FN3& f
              r2 = implement_arg2(f, fn1, fn2, fn3, a2, b2);
              return ret;
         }
+    }
+}
+
+template<typename F, typename FN1, typename FN2, typename FN3, typename T, typename S, typename R>
+inline auto implement_arg3(
+        const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, R a, T b, S c) {
+    // Arbitrary support is not allowed.
+    (void) f;
+    (void) fn1;
+    (void) fn2;
+    (void) fn3;
+    (void) a;
+    (void) b;
+    (void) c;
+    static_assert(dependent_false_v<T>);
+}
+
+template<typename F, typename FN1, typename FN2, typename FN3, typename T, typename S>
+inline auto implement_arg3(
+        const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a, T b, S c) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+        if constexpr (std::is_same_v<S, float> || std::is_same_v<S, double>) {
+            return f(a, b, c);
+        } else {
+            static_assert(dependent_false_v<T>);
+        }
+    } else if constexpr (std::is_same_v<S, float> || std::is_same_v<S, double>) {
+        // handle the lane variant
+#ifdef USE_NEON
+        if constexpr (std::is_same_v<T, float32x2_t>) {
+            return fn1(a, b, c);
+        } else if constexpr (std::is_same_v<T, float32x4_t>) {
+            return fn2(a, b, c);
+#if defined(__aarch64__)
+        } else if constexpr (std::is_same_v<T, float64x2_t>) {
+            return fn3(a, b, c);
+#endif
+        } else
+#endif // USE_NEON
+        {
+        T ret;
+        auto &[retval] = ret;  // single-member struct
+        const auto &[aval] = a;
+        const auto &[bval] = b;
+        if constexpr (std::is_array_v<decltype(retval)>) {
+#pragma unroll
+            for (size_t i = 0; i < std::size(aval); ++i) {
+                retval[i] = implement_arg3(f, fn1, fn2, fn3, aval[i], bval[i], c);
+            }
+            return ret;
+        } else /* constexpr */ {
+             auto &[r1, r2] = retval;
+             const auto &[a1, a2] = aval;
+             const auto &[b1, b2] = bval;
+             r1 = implement_arg3(f, fn1, fn2, fn3, a1, b1, c);
+             r2 = implement_arg3(f, fn1, fn2, fn3, a2, b2, c);
+             return ret;
+        }
+        }
+    } else {
+        // Both types T and S are non-primitive and they are not equal.
+        static_assert(dependent_false_v<T>);
     }
 }
 
@@ -1436,46 +1588,13 @@ inline T vadd(T a, T b) {
 // add internally
 template<typename T>
 inline auto vaddv(const T& a) {
-    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        return a;
-
-#ifdef USE_NEON
-    } else if constexpr (std::is_same_v<T, float32x2_t>) {
-        return vaddv_f32(a);
-#if defined(__aarch64__)
-    } else if constexpr (std::is_same_v<T, float32x4_t>) {
-        return vaddvq_f32(a);
-    } else if constexpr (std::is_same_v<T, float64x2_t>) {
-        return vaddvq_f64(a);
-#endif
-#endif // USE_NEON
-    } else if constexpr (is_array_like<T>) {
-        using ret_t = std::decay_t<decltype(a[0])>;
-
-        ret_t ret{};
-        // array_like is not the same as an array, so we use sizeof here
-        // to handle neon instrinsics.
-#pragma unroll
-        for (size_t i = 0; i < sizeof(a) / sizeof(a[0]); ++i) {
-            ret += a[i];
-        }
-        return ret;
-    } else /* constexpr */ {
-        const auto &[aval] = a;
-        using ret_t = std::decay_t<decltype(aval[0])>;
-        ret_t ret{};
-
-#pragma unroll
-        for (size_t i = 0; i < std::size(aval); ++i) {
-            ret += aval[i];
-        }
-        return ret;
-    }
+    return implement_arg1v([](const auto& x, const auto& y) { return x + y; },
+            DN64_(vaddv_f32), DN64_(vaddvq_f32), DN64_(vaddvq_f64), a);
 }
 
 // duplicate float into all elements.
 template<typename T, typename F>
-static inline T vdupn(F f) {
+inline T vdupn(F f) {
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
         return f;
 
@@ -1557,60 +1676,16 @@ static inline T vld1(const F *f) {
  * c_i = a_i * b if a is a vector and b is scalar or
  * c_i = a * b_i if a is scalar and b is a vector.
  */
-template<typename T, typename S, typename F>
-static inline T vmla(T a, S b, F c) {
-    // Both types T and S are non-primitive and they are not equal.  T == S handled below.
-    (void) a;
-    (void) b;
-    (void) c;
-    static_assert(dependent_false_v<T>);
-}
+
+// Workaround for missing method.
+#if defined(USE_NEON) && defined(__aarch64__)
+float64x2_t vmlaq_n_f64(float64x2_t __p0, float64x2_t __p1, float64_t __p2);
+#endif
 
 template<typename T, typename F>
 static inline T vmla(T a, T b, F c) {
-    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        if constexpr (std::is_same_v<F, float> || std::is_same_v<F, double>) {
-            return a + b * c;
-        } else {
-            static_assert(dependent_false_v<T>);
-        }
-    } else if constexpr (std::is_same_v<F, float> || std::is_same_v<F, double>) {
-        // handle the lane variant
-#ifdef USE_NEON
-        if constexpr (std::is_same_v<T, float32x2_t>) {
-            return vmla_n_f32(a, b, c);
-        } else if constexpr (std::is_same_v<T, float32x4_t>) {
-            return vmlaq_n_f32(a, b,c);
-#if defined(__aarch64__)
-        } else if constexpr (std::is_same_v<T, float64x2_t>) {
-            return vmlaq_n_f64(a, b);
-#endif
-        } else
-#endif // USE_NEON
-        {
-        T ret;
-        auto &[retval] = ret;  // single-member struct
-        const auto &[aval] = a;
-        const auto &[bval] = b;
-        if constexpr (std::is_array_v<decltype(retval)>) {
-#pragma unroll
-            for (size_t i = 0; i < std::size(aval); ++i) {
-                retval[i] = vmla(aval[i], bval[i], c);
-            }
-            return ret;
-        } else /* constexpr */ {
-             auto &[r1, r2] = retval;
-             const auto &[a1, a2] = aval;
-             const auto &[b1, b2] = bval;
-             r1 = vmla(a1, b1, c);
-             r2 = vmla(a2, b2, c);
-             return ret;
-        }
-        }
-    } else {
-        // Both types T and F are non-primitive and they are not equal.
-        static_assert(dependent_false_v<T>);
-    }
+    return implement_arg3([](const auto& x, const auto& y, const auto& z) { return x + y * z; },
+            DN_(vmla_n_f32), DN_(vmlaq_n_f32), DN64_(vmlaq_n_f64), a, b, c);
 }
 
 template<typename T, typename F>
@@ -1633,47 +1708,8 @@ inline T vmla(const T& a, const T& b, const T& c) {
  */
 template<typename T, typename F>
 static inline auto vmul(T a, F b) {
-    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        if constexpr (std::is_same_v<F, float> || std::is_same_v<F, double>) {
-            return a * b;
-        } else /* constexpr */ {
-            return vmul(b, a); // we prefer T to be the vector/struct form.
-        }
-    } else if constexpr (std::is_same_v<F, float> || std::is_same_v<F, double>) {
-        // handle the lane variant
-#ifdef USE_NEON
-        if constexpr (std::is_same_v<T, float32x2_t>) {
-            return vmul_n_f32(a, b);
-        } else if constexpr (std::is_same_v<T, float32x4_t>) {
-            return vmulq_n_f32(a, b);
-#if defined(__aarch64__)
-        } else if constexpr (std::is_same_v<T, float64x2_t>) {
-            return vmulq_n_f64(a, b);
-#endif
-        } else
-#endif // USE_NEON
-        {
-        T ret;
-        auto &[retval] = ret;  // single-member struct
-        const auto &[aval] = a;
-        if constexpr (std::is_array_v<decltype(retval)>) {
-#pragma unroll
-            for (size_t i = 0; i < std::size(aval); ++i) {
-                retval[i] = vmul(aval[i], b);
-            }
-            return ret;
-        } else /* constexpr */ {
-             auto &[r1, r2] = retval;
-             const auto &[a1, a2] = aval;
-             r1 = vmul(a1, b);
-             r2 = vmul(a2, b);
-             return ret;
-        }
-        }
-    } else {
-        // Both types T and F are non-primitive and they are not equal.
-        static_assert(dependent_false_v<T>);
-    }
+    return implement_arg2([](const auto& x, const auto& y) { return x * y; },
+            DN_(vmul_n_f32), DN_(vmulq_n_f32), DN64_(vmulq_n_f64), a, b);
 }
 
 template<typename T>
