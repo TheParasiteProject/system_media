@@ -38,6 +38,37 @@
 #define USE_NEON
 #endif
 
+// We use macros to hide intrinsic methods that do not exist for
+// incompatible target architectures; otherwise we have a
+// "use of undeclared identifier" compilation error when
+// we invoke our templated method.
+//
+// For example, we pass in DN_(vadd_f32) into implement_arg2().
+// For ARM compilation, this works as expected, vadd_f32 is used.
+// For x64 compilation, the macro converts vadd_f32 to a nullptr
+// (so there is no undeclared identifier) and the calling site is safely
+// ifdef'ed out in implement_arg2() for non ARM architectures.
+//
+// DN_(x) replaces x with nullptr for non-ARM arch
+// DN64_(x) replaces x with nullptr for non-ARM64 arch
+#pragma push_macro("DN_")
+#pragma push_macro("DN64_")
+#undef DN_
+#undef DN64_
+
+#ifdef USE_NEON
+#if defined(__aarch64__)
+#define DN_(x) x
+#define DN64_(x) x
+#else
+#define DN_(x) x
+#define DN64_(x) nullptr
+#endif
+#else
+#define DN_(x) nullptr
+#define DN64_(x) nullptr
+#endif // USE_NEON
+
 namespace android::audio_utils::intrinsics {
 
 // For static assert(false) we need a template version to avoid early failure.
@@ -1282,43 +1313,124 @@ inline bool veq(T a, T b) {
 
 // --------------------------------------------------------------------
 
-// add a + b
-template<typename T>
-static inline T vadd(T a, T b) {
+template<typename F, typename FN1, typename FN2, typename FN3, typename T>
+inline T implement_arg1(const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a) {
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        return a + b;
-
+        return f(a);
 #ifdef USE_NEON
     } else if constexpr (std::is_same_v<T, float32x2_t>) {
-        return vadd_f32(a, b);
+        return fn1(a);
     } else if constexpr (std::is_same_v<T, float32x4_t>) {
-        return vaddq_f32(a, b);
+        return fn2(a);
 #if defined(__aarch64__)
     } else if constexpr (std::is_same_v<T, float64x2_t>) {
-        return vaddq_f64(a, b);
+        return fn3(a);
 #endif
 #endif // USE_NEON
 
     } else /* constexpr */ {
         T ret;
-        auto &[retval] = ret;  // single-member struct
-        const auto &[aval] = a;
-        const auto &[bval] = b;
+        auto& [retval] = ret;  // single-member struct
+        const auto& [aval] = a;
         if constexpr (std::is_array_v<decltype(retval)>) {
 #pragma unroll
             for (size_t i = 0; i < std::size(aval); ++i) {
-                retval[i] = vadd(aval[i], bval[i]);
+                retval[i] = implement_arg1(f, fn1, fn2, fn3, aval[i]);
             }
             return ret;
         } else /* constexpr */ {
-             auto &[r1, r2] = retval;
-             const auto &[a1, a2] = aval;
-             const auto &[b1, b2] = bval;
-             r1 = vadd(a1, b1);
-             r2 = vadd(a2, b2);
+             auto& [r1, r2] = retval;
+             const auto& [a1, a2] = aval;
+             r1 = implement_arg1(f, fn1, fn2, fn3, a1);
+             r2 = implement_arg1(f, fn1, fn2, fn3, a2);
              return ret;
         }
     }
+}
+
+template<typename F, typename FN1, typename FN2, typename FN3, typename T>
+inline T implement_arg2(const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a, T b) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+        return f(a, b);
+
+#ifdef USE_NEON
+    } else if constexpr (std::is_same_v<T, float32x2_t>) {
+        return fn1(a, b);
+    } else if constexpr (std::is_same_v<T, float32x4_t>) {
+        return fn2(a, b);
+#if defined(__aarch64__)
+    } else if constexpr (std::is_same_v<T, float64x2_t>) {
+        return fn3(a, b);
+#endif
+#endif // USE_NEON
+
+    } else /* constexpr */ {
+        T ret;
+        auto& [retval] = ret;  // single-member struct
+        const auto& [aval] = a;
+        const auto& [bval] = b;
+        if constexpr (std::is_array_v<decltype(retval)>) {
+#pragma unroll
+            for (size_t i = 0; i < std::size(aval); ++i) {
+                retval[i] = implement_arg2(f, fn1, fn2, fn3, aval[i], bval[i]);
+            }
+            return ret;
+        } else /* constexpr */ {
+             auto& [r1, r2] = retval;
+             const auto& [a1, a2] = aval;
+             const auto& [b1, b2] = bval;
+             r1 = implement_arg2(f, fn1, fn2, fn3, a1, b1);
+             r2 = implement_arg2(f, fn1, fn2, fn3, a2, b2);
+             return ret;
+        }
+    }
+}
+
+template<typename F, typename FN1, typename FN2, typename FN3, typename T>
+inline T implement_arg3(
+        const F& f, const FN1& fn1, const FN2& fn2, const FN3& fn3, T a, T b, T c) {
+    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
+        return f(a, b, c);
+
+#ifdef USE_NEON
+    } else if constexpr (std::is_same_v<T, float32x2_t>) {
+        return fn1(a, b, c);
+    } else if constexpr (std::is_same_v<T, float32x4_t>) {
+        return fn2(a, b, c);
+#if defined(__aarch64__)
+    } else if constexpr (std::is_same_v<T, float64x2_t>) {
+        return fn3(a, b, c);
+#endif
+#endif // USE_NEON
+
+    } else /* constexpr */ {
+        T ret;
+        auto& [retval] = ret;  // single-member struct
+        const auto& [aval] = a;
+        const auto& [bval] = b;
+        const auto& [cval] = c;
+        if constexpr (std::is_array_v<decltype(retval)>) {
+#pragma unroll
+            for (size_t i = 0; i < std::size(aval); ++i) {
+                retval[i] = implement_arg3(f, fn1, fn2, fn3, aval[i], bval[i], cval[i]);
+            }
+            return ret;
+        } else /* constexpr */ {
+             auto& [r1, r2] = retval;
+             const auto& [a1, a2] = aval;
+             const auto& [b1, b2] = bval;
+             const auto& [c1, c2] = cval;
+             r1 = implement_arg3(f, fn1, fn2, fn3, a1, b1, c1);
+             r2 = implement_arg3(f, fn1, fn2, fn3, a2, b2, c2);
+             return ret;
+        }
+    }
+}
+
+template<typename T>
+inline T vadd(T a, T b) {
+    return implement_arg2([](const auto& x, const auto& y) { return x + y; },
+            DN_(vadd_f32), DN_(vaddq_f32), DN64_(vaddq_f64), a, b);
 }
 
 // add internally
@@ -1509,42 +1621,8 @@ static inline T vmla(T a, F b, T c) {
 // fused multiply-add a + b * c
 template<typename T>
 inline T vmla(const T& a, const T& b, const T& c) {
-    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        return a + b * c;
-
-#ifdef USE_NEON
-    } else if constexpr (std::is_same_v<T, float32x2_t>) {
-        return vmla_f32(a, b, c);
-    } else if constexpr (std::is_same_v<T, float32x4_t>) {
-        return vmlaq_f32(a, b, c);
-#if defined(__aarch64__)
-    } else if constexpr (std::is_same_v<T, float64x2_t>) {
-        return vmlaq_f64(a, b, c);
-#endif
-#endif // USE_NEON
-
-    } else /* constexpr */ {
-        T ret;
-        auto &[retval] = ret;  // single-member struct
-        const auto &[aval] = a;
-        const auto &[bval] = b;
-        const auto &[cval] = c;
-        if constexpr (std::is_array_v<decltype(retval)>) {
-#pragma unroll
-            for (size_t i = 0; i < std::size(aval); ++i) {
-                retval[i] = vmla(aval[i], bval[i], cval[i]);
-            }
-            return ret;
-        } else /* constexpr */ {
-             auto &[r1, r2] = retval;
-             const auto &[a1, a2] = aval;
-             const auto &[b1, b2] = bval;
-             const auto &[c1, c2] = cval;
-             r1 = vmla(a1, b1, c1);
-             r2 = vmla(a2, b2, c2);
-             return ret;
-        }
-    }
+    return implement_arg3([](const auto& x, const auto& y, const auto& z) { return x + y * z; },
+            DN_(vmla_f32), DN_(vmlaq_f32), DN64_(vmlaq_f64), a, b, c);
 }
 
 /**
@@ -1599,78 +1677,16 @@ static inline auto vmul(T a, F b) {
 }
 
 template<typename T>
-static inline T vmul(T a, T b) {
-    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        return a * b;
-
-#ifdef USE_NEON
-    } else if constexpr (std::is_same_v<T, float32x2_t>) {
-        return vmul_f32(a, b);
-    } else if constexpr (std::is_same_v<T, float32x4_t>) {
-        return vmulq_f32(a, b);
-#if defined(__aarch64__)
-    } else if constexpr (std::is_same_v<T, float64x2_t>) {
-        return vmulq_f64(a, b);
-#endif
-#endif // USE_NEON
-
-    } else /* constexpr */ {
-        T ret;
-        auto &[retval] = ret;  // single-member struct
-        const auto &[aval] = a;
-        const auto &[bval] = b;
-        if constexpr (std::is_array_v<decltype(retval)>) {
-#pragma unroll
-            for (size_t i = 0; i < std::size(aval); ++i) {
-                retval[i] = vmul(aval[i], bval[i]);
-            }
-            return ret;
-        } else /* constexpr */ {
-             auto &[r1, r2] = retval;
-             const auto &[a1, a2] = aval;
-             const auto &[b1, b2] = bval;
-             r1 = vmul(a1, b1);
-             r2 = vmul(a2, b2);
-             return ret;
-        }
-    }
+inline T vmul(T a, T b) {
+    return implement_arg2([](const auto& x, const auto& y) { return x * y; },
+            DN_(vmul_f32), DN_(vmulq_f32), DN64_(vmulq_f64), a, b);
 }
 
 // negate
 template<typename T>
-static inline T vneg(T f) {
-    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        return -f;
-
-#ifdef USE_NEON
-    } else if constexpr (std::is_same_v<T, float32x2_t>) {
-        return vneg_f32(f);
-    } else if constexpr (std::is_same_v<T, float32x4_t>) {
-        return vnegq_f32(f);
-#if defined(__aarch64__)
-    } else if constexpr (std::is_same_v<T, float64x2_t>) {
-        return vnegq_f64(f);
-#endif
-#endif // USE_NEON
-
-    } else /* constexpr */ {
-        T ret;
-        auto &[retval] = ret;  // single-member struct
-        const auto &[fval] = f;
-        if constexpr (std::is_array_v<decltype(retval)>) {
-#pragma unroll
-            for (size_t i = 0; i < std::size(fval); ++i) {
-                retval[i] = vneg(fval[i]);
-            }
-            return ret;
-        } else /* constexpr */ {
-             auto &[r1, r2] = retval;
-             const auto &[f1, f2] = fval;
-             r1 = vneg(f1);
-             r2 = vneg(f2);
-             return ret;
-        }
-    }
+inline T vneg(T a) {
+    return implement_arg1([](const auto& x) { return -x; },
+            DN_(vneg_f32), DN_(vnegq_f32), DN64_(vnegq_f64), a);
 }
 
 // store to float pointer.
@@ -1710,45 +1726,15 @@ static inline void vst1(F *f, T a) {
 
 // subtract a - b
 template<typename T>
-static inline T vsub(T a, T b) {
-    if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-        return a - b;
-
-#ifdef USE_NEON
-    } else if constexpr (std::is_same_v<T, float32x2_t>) {
-        return vsub_f32(a, b);
-    } else if constexpr (std::is_same_v<T, float32x4_t>) {
-        return vsubq_f32(a, b);
-#if defined(__aarch64__)
-    } else if constexpr (std::is_same_v<T, float64x2_t>) {
-        return vsubq_f64(a, b);
-#endif
-#endif // USE_NEON
-
-    } else /* constexpr */ {
-        T ret;
-        auto &[retval] = ret;  // single-member struct
-        const auto &[aval] = a;
-        const auto &[bval] = b;
-        if constexpr (std::is_array_v<decltype(retval)>) {
-#pragma unroll
-            for (size_t i = 0; i < std::size(aval); ++i) {
-                retval[i] = vsub(aval[i], bval[i]);
-            }
-            return ret;
-        } else /* constexpr */ {
-             auto &[r1, r2] = retval;
-             const auto &[a1, a2] = aval;
-             const auto &[b1, b2] = bval;
-             r1 = vsub(a1, b1);
-             r2 = vsub(a2, b2);
-             return ret;
-        }
-    }
+inline T vsub(T a, T b) {
+    return implement_arg2([](const auto& x, const auto& y) { return x - y; },
+            DN_(vsub_f32), DN_(vsubq_f32), DN64_(vsubq_f64), a, b);
 }
 
 } // namespace android::audio_utils::intrinsics
 
+#pragma pop_macro("DN64_")
+#pragma pop_macro("DN_")
 #pragma pop_macro("USE_NEON")
 
 #endif // !ANDROID_AUDIO_UTILS_INTRINSIC_UTILS_H
