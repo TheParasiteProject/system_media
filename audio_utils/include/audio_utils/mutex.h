@@ -506,9 +506,14 @@ public:
     T operator=(T desired) { t_ = desired; return desired; }
 
     // a volatile ++t_ or t_ += 1 is deprecated in C++20.
-    T operator--() { return operator=(t_ - 1); }
-    T operator++() { return operator=(t_ + 1); }
-    T operator+=(const T value) { return operator=(t_ + value); }
+    T operator--() { return operator+=(-1); }
+    T operator++() { return operator+=(1); }
+    T operator+=(const T value) {
+        T output;
+        // atomic overflow is defined as 2's complement.
+        (void)__builtin_add_overflow(t_, value, &output);
+        return operator=(output);
+    }
 
     T load(std::memory_order order = std::memory_order_relaxed) const { (void)order; return t_; }
 
