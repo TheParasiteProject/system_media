@@ -28,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <sys/syscall.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -119,6 +120,47 @@ inline constexpr const char* const gMutexNames[] = {
 class AudioMutexAttributes;
 template <typename T> class mutex_impl;
 using mutex = mutex_impl<AudioMutexAttributes>;
+
+// fair_mutex is a mutex that guarantees fairness: threads acquire the lock in the
+// order they attempt to acquire it.
+//
+// This is implemented by maintaining a queue of threads waiting to acquire the
+// lock. When a thread attempts to acquire the lock, it adds itself to the
+// queue and waits until it is at the front of the queue if waiting is needed.
+// When a thread releases the lock, it notifies the next thread in the queue.
+class CAPABILITY("mutex") fair_mutex {
+public:
+    void lock() ACQUIRE() {
+        std::unique_lock ul(mutex_);
+        if (++clients_ == 1) return;  // we're the only one.
+        auto cvp = std::make_shared<std::pair<bool, std::condition_variable>>();
+        queue_.push(cvp);
+        while (!cvp->first) {
+            cvp->second.wait(ul);
+        }
+    }
+
+    void unlock() RELEASE() {
+        std::shared_ptr<std::pair<bool, std::condition_variable>> cvp;
+        {
+            std::lock_guard lg(mutex_);
+            if (--clients_ == 0) return;  // noone else.
+            LOG_ALWAYS_FATAL_IF(clients_ < 0,
+                    "%s: unlock called too many times (%lld)",
+                    __func__, (long long)clients_);
+            cvp = queue_.front();
+            cvp->first = true;
+            queue_.pop();
+        }
+        cvp->second.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::queue<std::shared_ptr<std::pair<bool, std::condition_variable>>>
+            queue_ GUARDED_BY(mutex_);
+    int64_t clients_ GUARDED_BY(mutex_) = 0;
+};
 
 // Capabilities in priority order
 // (declaration only, value is nullptr)
