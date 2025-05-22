@@ -17,6 +17,8 @@
 #pragma once
 #include <utils/Log.h>
 
+#include <atomic>
+
 #pragma push_macro("LOG_TAG")
 #undef LOG_TAG
 #define LOG_TAG "audio_utils::atomic"
