@@ -352,3 +352,5 @@ void atomic_add_to(atomic<AccumulateType, MemoryOrder>& dst, ValueType src,
 }
 
 } // namespace android::audio_utils
+
+#pragma pop_macro("LOG_TAG")
