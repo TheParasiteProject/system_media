@@ -21,6 +21,7 @@
 #undef LOG_TAG
 #define LOG_TAG "audio_utils::atomic"
 
+#include <algorithm>
 #include <atomic>
 
 namespace android::audio_utils {
