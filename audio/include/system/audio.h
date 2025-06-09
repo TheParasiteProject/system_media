@@ -128,7 +128,7 @@ typedef struct {
 /** The separator for tags. */
 static const char AUDIO_ATTRIBUTES_TAGS_SEPARATOR = ';';
 /** Tag value for GMAP bidirectional mode indication */
-static const char* AUDIO_ATTRIBUTES_TAG_GMAP_BIDIRECTIONAL = "bidirectional";
+static const char* AUDIO_ATTRIBUTES_TAG_GMAP_BIDIRECTIONAL = "VX_AOSP_bidirectional";
 
 // Keep sync with android/media/AudioProductStrategy.java
 static const audio_flags_mask_t AUDIO_FLAGS_AFFECT_STRATEGY_SELECTION =
