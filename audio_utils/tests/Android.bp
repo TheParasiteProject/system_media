@@ -934,3 +934,25 @@ cc_test {
         "-Werror",
     ],
 }
+
+cc_test {
+    name: "timerqueue_tests",
+    host_supported: true,
+    srcs: [
+        "timerqueue_tests.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+        "liblog",
+        "libutils",
+    ],
+    static_libs: [
+        "libaudioutils",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+        "-Wthread-safety",
+    ],
+}
