@@ -816,8 +816,7 @@ xsi:schemaLocation="http://schemas.android.com/service/camera/metadata/ metadata
                 flash.
               </notes>
             </value>
-            <value optional="true" hal_version="3.10"
-                aconfig_flag="camera_ae_mode_low_light_boost">ON_LOW_LIGHT_BOOST_BRIGHTNESS_PRIORITY
+            <value optional="true" hal_version="3.10">ON_LOW_LIGHT_BOOST_BRIGHTNESS_PRIORITY
               <notes>
                 Like 'ON' but applies additional brightness boost in low light scenes.
 
@@ -4049,8 +4048,7 @@ xsi:schemaLocation="http://schemas.android.com/service/camera/metadata/ metadata
     </dynamic>
     <static>
         <entry name="lowLightBoostInfoLuminanceRange" type="float" visibility="public"
-               optional="true" container="array" typedef="rangeFloat"
-               aconfig_flag="camera_ae_mode_low_light_boost" hal_version="3.10">
+               optional="true" container="array" typedef="rangeFloat" hal_version="3.10">
           <array>
             <size>2</size>
           </array>
@@ -4075,7 +4073,7 @@ xsi:schemaLocation="http://schemas.android.com/service/camera/metadata/ metadata
       </static>
       <dynamic>
         <entry name="lowLightBoostState" type="byte" visibility="public" optional="true" enum="true"
-               aconfig_flag="camera_ae_mode_low_light_boost" hal_version="3.10">
+               hal_version="3.10">
           <enum>
             <value>INACTIVE
             <notes>
