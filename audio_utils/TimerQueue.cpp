@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+//#define LOG_NDEBUG 0
+#define LOG_TAG "TimerQueue"
+
 #include <audio_utils/TimerQueue.h>
 
 #include <log/log.h>
@@ -26,7 +29,7 @@ namespace android::audio_utils {
 TimerQueue::TimerQueue(bool alarm)
     : mAlarm(alarm),
       mTimerFd{timerfd_create((alarm ? CLOCK_BOOTTIME_ALARM : CLOCK_BOOTTIME),
-            TFD_CLOEXEC | TFD_NONBLOCK)} {
+            TFD_CLOEXEC)} {
     if (mTimerFd < 0) {
         ALOGE("Failed to create timerfd: %s", strerror(errno));
         return;
@@ -129,6 +132,7 @@ void TimerQueue::threadLoop() {
         ssize_t n = read(mTimerFd, &expirations, sizeof(expirations));
         std::vector<std::function<void()>> functionsToRun;
         {
+            ALOGV("%s: read %zd",__func__, n);
             std::lock_guard lock(mMutex);
             if (!mRunning) break;
             if (n < 0) {
