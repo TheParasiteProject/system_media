@@ -19,150 +19,351 @@
 
 #include <audio_utils/TimerQueue.h>
 
+#include <algorithm>
 #include <log/log.h>
+#include <sys/epoll.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 #include <utils/SystemClock.h>
 
 namespace android::audio_utils {
 
-TimerQueue::TimerQueue(bool alarm)
-    : mAlarm(alarm),
-      mTimerFd{timerfd_create((alarm ? CLOCK_BOOTTIME_ALARM : CLOCK_BOOTTIME),
-            TFD_CLOEXEC)} {
-    if (mTimerFd < 0) {
-        ALOGE("Failed to create timerfd: %s", strerror(errno));
-        return;
+class LinuxClock : public IClock {
+public:
+    LinuxClock()
+        : mPollHandle(epoll_create1(EPOLL_CLOEXEC)) {
+        ALOGE_IF(mPollHandle < 0,
+                "%s: failed epoll_create1(): %s",
+                __func__, strerror(errno));
     }
+    ~LinuxClock() override {
+        if (mPollHandle != INVALID_HANDLE) close(mPollHandle);
+        for (auto handle : mHandles) {
+            close(handle);
+        }
+    }
+
+    Handle createTimer(ClockType clockType) override;
+    status_t destroyTimer(Handle handle) override;
+    bool ready() const override { return mPollHandle != INVALID_HANDLE; }
+    int setTimer(Handle handle, nsecs_t time) override;
+    Handle wait(nsecs_t timeout) override;
+
+protected:
+    const Handle mPollHandle;
+    std::set<Handle> mHandles;
+};
+
+std::unique_ptr<IClock> IClock::createLinuxClock() {
+    return std::make_unique<LinuxClock>();
+}
+
+IClock::Handle LinuxClock::createTimer(ClockType clockType) {
+    if (!ready()) return INVALID_HANDLE;
+    clockid_t id;
+    switch (clockType) {
+    case BOOTTIME:
+        id = CLOCK_BOOTTIME;
+        break;
+    case BOOTTIME_ALARM:
+        id = CLOCK_BOOTTIME_ALARM;
+        break;
+    default:
+        ALOGE("%s: invalid clockType %d", __func__, static_cast<int>(clockType));
+        return INVALID_HANDLE;
+    }
+    const int fd = timerfd_create(id, TFD_CLOEXEC);
+    // it is not uncommon for this to fail if there is no permission for CLOCK_BOOTTIME_ALARM.
+    if (fd == -1) {
+        ALOGE("%s: failed timerfd_create(%d): %s", __func__, id, strerror(errno));
+        return INVALID_HANDLE;
+    }
+
+    struct epoll_event event {
+        .events = EPOLLIN | EPOLLWAKEUP,
+        .data = {.fd = fd},
+    };
+    const int status = epoll_ctl(mPollHandle, EPOLL_CTL_ADD, fd, &event);
+    if (status < 0) {
+        ALOGE("%s: failed epoll_ctl(): %s", __func__, strerror(errno));
+        close(fd);
+        return INVALID_HANDLE;
+    }
+    mHandles.emplace(fd);
+    return fd;
+}
+
+status_t LinuxClock::destroyTimer(Handle handle) {
+    if (mHandles.erase(handle) == 0) return BAD_VALUE;
+    const int status = epoll_ctl(mPollHandle, EPOLL_CTL_DEL, handle, nullptr /* event */);
+    return status == 0 ? OK : -errno;
+}
+
+status_t LinuxClock::setTimer(Handle handle, nsecs_t time) {
+    if (!ready()) return INVALID_HANDLE;
+    struct itimerspec spec{};
+    if (time > 0) {
+        spec.it_value.tv_sec = time / 1'000'000'000;
+        spec.it_value.tv_nsec = time % 1'000'000'000;
+    }
+    const int ret = timerfd_settime(handle, TFD_TIMER_ABSTIME, &spec, nullptr);
+    if (ret == 0) return OK;
+    return -errno;
+}
+
+IClock::Handle LinuxClock::wait(nsecs_t timeout) {
+    if (!ready()) return INVALID_HANDLE;
+    struct epoll_event event;
+    int timeoutMs = (timeout > INT_MAX * 1'000'000LL) ? INT_MAX :
+            (timeout < 0) ? -1 :
+            timeout / 1'000'000;
+    const int n = epoll_wait(mPollHandle, &event, 1, timeoutMs);
+    if (n < 0) {
+        ALOGE("%s: wait from poll handle %d failed: %s", __func__, mPollHandle, strerror(errno));
+        return errno == EINTR ? INTR_HANDLE : INVALID_HANDLE;
+    }
+    if (n == 0) {
+        return PENDING_HANDLE;
+    }
+
+    const int fd = event.data.fd;
+    uint64_t expirations;
+    ssize_t nread = read(fd, &expirations, sizeof(expirations));
+    ALOGV("%s: read %zd from timer %d", __func__, nread, fd);
+    if (nread < 0) {
+        ALOGE("%s: read from timer %d failed: %s", __func__, fd, strerror(errno));
+        if (errno == EAGAIN || errno == EINTR) return PENDING_HANDLE;
+        return INVALID_HANDLE;
+    }
+    return fd;
+}
+
+TimerQueue::TimerQueue(bool alarm)
+    : TimerQueue(IClock::createLinuxClock(), alarm) {
+}
+
+TimerQueue::TimerQueue(std::unique_ptr<IClock> clock, bool alarm)
+    : mClock(std::move(clock)),
+      mAlarm(alarm) {
+
+    // create our alarm clocks
+    mAlarmClocks.emplace_back(mClock.get(), IClock::BOOTTIME, mRunning);
+    if (alarm) {
+        mAlarmClocks.emplace_back(mClock.get(), IClock::BOOTTIME_ALARM, mRunning);
+    }
+    mRunning = true;
     mThread = std::thread(&TimerQueue::threadLoop, this);
 }
 
 TimerQueue::~TimerQueue() {
-    if (mTimerFd < 0) return;
+    if (!mClock->ready()) return;
 
     {
         std::lock_guard lock(mMutex);
         mRunning = false;
-        armTimerForNextEvent_l();
+        for (auto& alarmClock : mAlarmClocks) {
+            alarmClock.armTimerForNextEvent();
+        }
     }
+
     if (mThread.joinable()) {
         mThread.join();
     }
-    close(mTimerFd);
+    mClock.reset();
+    mAlarmClocks.clear();
 }
 
-TimerQueue::handle_t TimerQueue::add(std::function<void()> function, nsecs_t executionTime) {
-    if (!function) {
-        return INVALID_HANDLE;
+TimerQueue::EventId TimerQueue::add(std::function<void()> function, nsecs_t executionTime) {
+    if (!mClock->ready() || !function) {
+        return INVALID_EVENT_ID;
     }
 
     std::lock_guard lock(mMutex);
+    const EventId id = getNextEventId_l();
+    const auto event = std::make_shared<Event>(Event{id, std::move(function), executionTime});
 
-    handle_t handle = mNextHandle;
-    if (handle == std::numeric_limits<handle_t>::max()) { // Handle wrap-around
-        mNextHandle = 1;
+    if (mAlarm) {
+        mAlarmClocks[1].add(executionTime, event);
     } else {
-        ++mNextHandle;
+        mAlarmClocks[0].add(executionTime, event);
     }
-
-    const bool needsReschedule = mTimeIndex.empty() || executionTime < mTimeIndex.begin()->first;
-
-    mEvents.emplace(handle, Event{std::move(function), executionTime});
-    mTimeIndex.emplace(executionTime, handle);
-
-    if (needsReschedule) {
-        armTimerForNextEvent_l();
-    }
-
-    return handle;
+    return id;
 }
 
-bool TimerQueue::remove(handle_t handle) {
-    if (handle == INVALID_HANDLE) {
+TimerQueue::EventId TimerQueue::add(std::function<void()> function,
+            nsecs_t softDeadline, nsecs_t hardDeadline, nsecs_t priorityTime) {
+    if (!mClock->ready() || !function) {
+        return INVALID_EVENT_ID;
+    }
+
+    std::lock_guard lock(mMutex);
+    const EventId id = getNextEventId_l();
+    const auto event = std::make_shared<Event>(Event{id, std::move(function),
+            priorityTime >= 0 ? priorityTime : hardDeadline});
+
+    if (mAlarm) {
+        mAlarmClocks[0].add(softDeadline, event);
+        mAlarmClocks[1].add(hardDeadline, event);
+    } else {
+        mAlarmClocks[0].add(softDeadline, event);
+    }
+    return id;
+}
+
+
+bool TimerQueue::remove(EventId id) {
+    if (!mClock->ready() || id == INVALID_EVENT_ID) {
         return false;
     }
 
+    // check all clocks (an id can belong to more than one clock).
+    bool found = false;
     std::lock_guard lock(mMutex);
+    for (auto& alarmClock : mAlarmClocks) {
+        if (alarmClock.remove(id)) found = true;
+    }
+    return found;
+}
 
-    const auto eventIt = mEvents.find(handle);
+TimerQueue::EventId TimerQueue::getNextEventId_l() {
+    const EventId id = mNextEventId;
+    if (id == std::numeric_limits<EventId>::max()) { // id wrap-around
+        mNextEventId = 1;
+    } else {
+        ++mNextEventId;
+    }
+    return id;
+}
+
+void TimerQueue::threadLoop() {
+    while (true) {
+        const IClock::Handle handle = mClock->wait(-1 /* timeout */);
+        ALOGV("%s: Clock wait %d", __func__, handle);
+
+        if (handle == IClock::INVALID_HANDLE) {
+            break;
+        } else if (handle == IClock::PENDING_HANDLE || handle == IClock::INTR_HANDLE) {
+            continue;
+        }
+
+        std::set<std::shared_ptr<Event>> events;
+        {
+            std::lock_guard lock(mMutex);
+
+            if (!mRunning) break;
+
+            const nsecs_t now = elapsedRealtimeNano();
+
+            // collect all the events that are active
+            for (auto& alarmClock : mAlarmClocks) {
+                alarmClock.collectEvents(now, events);
+            }
+            // if an event has been registered on multiple alarms, remove it.
+            // to prevent duplicate execution.
+            for (auto& alarmClock : mAlarmClocks) {
+                alarmClock.removeEvents(events);
+            }
+        }
+        std::vector<std::shared_ptr<Event>> sorted{events.begin(), events.end()};
+        std::sort(sorted.begin(), sorted.end(),
+                [](const std::shared_ptr<Event>& e1, const std::shared_ptr<Event>& e2) {
+                    return e1->priorityTime < e2->priorityTime;});
+        // execute the lambdas outside the lock
+        for (const auto& event : sorted) {
+            event->function();
+        }
+    }
+}
+
+TimerQueue::AlarmClock::AlarmClock(IClock* clock, IClock::ClockType clockType, bool& running)
+    : mClock(clock)
+    , mTimerHandle{mClock->createTimer(clockType)}
+    , mRunning(running) {
+    if (mTimerHandle < 0) {
+        ALOGE("%s: failed to create timer for clockType %d: %s",
+                __func__, clockType, strerror(errno));
+        return;
+    }
+}
+
+TimerQueue::AlarmClock::~AlarmClock() {
+}
+
+void TimerQueue::AlarmClock::add(nsecs_t executionTime, const std::shared_ptr<Event>& event) {
+
+    const bool needsReschedule = mTimeIndex.empty() || executionTime < mTimeIndex.begin()->first;
+
+    mEvents.emplace(event->id, std::make_pair(event, executionTime));
+    mTimeIndex.emplace(executionTime, event->id);
+
+    if (needsReschedule) {
+        armTimerForNextEvent();
+    }
+}
+
+bool TimerQueue::AlarmClock::remove(EventId id) {
+    if (id == INVALID_EVENT_ID) {
+        return false;
+    }
+
+    const auto eventIt = mEvents.find(id);
     if (eventIt == mEvents.end()) {
         return false;
     }
 
-    const nsecs_t executionTime = eventIt->second.executionTime;
-    const bool wasNext = (mTimeIndex.begin()->second == handle);
+    auto [event, executionTime] = eventIt->second;
+    const bool wasNext = (mTimeIndex.begin()->second == id);
 
     mEvents.erase(eventIt);
 
     const auto [first, last] = mTimeIndex.equal_range(executionTime);
     for (auto it = first; it != last; ++it) {
-        if (it->second == handle) {
+        if (it->second == id) {
             mTimeIndex.erase(it);
             break;
         }
     }
 
     if (wasNext) {
-        armTimerForNextEvent_l();
+        armTimerForNextEvent();
     }
 
+    // caution event may be released inside of lock.
     return true;
 }
 
-void TimerQueue::armTimerForNextEvent_l() {
-    struct itimerspec spec{};
+void TimerQueue::AlarmClock::armTimerForNextEvent() {
+    nsecs_t nextTime = 0;
     if (!mRunning) {
         // Set a timer for 1 nanosecond to ensure it fires immediately and unblocks the read.
-        spec.it_value.tv_nsec = 1;
-        timerfd_settime(mTimerFd, 0 /* flags */, &spec, /* old_value */ nullptr);
+        nextTime = 1;
     } else if (!mTimeIndex.empty()) {
-        nsecs_t nextTime = mTimeIndex.begin()->first;
-        spec.it_value.tv_sec = nextTime / 1'000'000'000;
-        spec.it_value.tv_nsec = nextTime % 1'000'000'000;
-        timerfd_settime(mTimerFd, TFD_TIMER_ABSTIME, &spec, /* old_value */ nullptr);
-    } else {
-        // Set timer to 0 disables it
-        timerfd_settime(mTimerFd, TFD_TIMER_ABSTIME, &spec, /* old_value */ nullptr);
+        nextTime = mTimeIndex.begin()->first;
+    }
+    mClock->setTimer(mTimerHandle, nextTime);
+}
+
+void TimerQueue::AlarmClock::collectEvents(
+        nsecs_t now, std::set<std::shared_ptr<Event>>& events) {
+    while (!mTimeIndex.empty() && mTimeIndex.begin()->first <= now) {
+        const auto it = mTimeIndex.begin();
+        const EventId id = it->second;
+
+        const auto eventIt = mEvents.find(id);
+        if (eventIt != mEvents.end()) {
+            events.emplace(std::move(eventIt->second.first));
+            mEvents.erase(eventIt);
+        }
+        mTimeIndex.erase(it);
+    }
+    armTimerForNextEvent();
+}
+
+void TimerQueue::AlarmClock::removeEvents(const std::set<std::shared_ptr<Event>>& events) {
+    for (const auto& event : events) {
+        remove(event->id);
     }
 }
 
-void TimerQueue::threadLoop() {
-    while (true) {
-        uint64_t expirations;
-        ssize_t n = read(mTimerFd, &expirations, sizeof(expirations));
-        std::vector<std::function<void()>> functionsToRun;
-        {
-            ALOGV("%s: read %zd",__func__, n);
-            std::lock_guard lock(mMutex);
-            if (!mRunning) break;
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EINTR) {
-                    continue;
-                }
-                ALOGE("read(timerfd) failed: %s", strerror(errno));
-             }
-
-            const nsecs_t now = elapsedRealtimeNano();
-
-            while (!mTimeIndex.empty() && mTimeIndex.begin()->first <= now) {
-                const auto it = mTimeIndex.begin();
-                const handle_t handle = it->second;
-
-                const auto eventIt = mEvents.find(handle);
-                if (eventIt != mEvents.end()) {
-                    functionsToRun.push_back(std::move(eventIt->second.function));
-                    mEvents.erase(eventIt);
-                }
-                mTimeIndex.erase(it);
-            }
-
-            armTimerForNextEvent_l();
-        }
-
-        for (const auto& func : functionsToRun) {
-            func();
-        }
-    }
-}
 
 } // namespace android::audio_utils

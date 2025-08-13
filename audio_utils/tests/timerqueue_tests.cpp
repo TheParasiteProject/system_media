@@ -56,9 +56,12 @@ TEST_F(TimerQueueTest, AddAndExecute) {
 
     audio_utils::unique_lock ul(mMutex);
     const auto timepoint = std::chrono::steady_clock::now() + 100ms;
+    int tries = 0;
     do {
         const auto status = mCv.wait_until(ul, timepoint);
         EXPECT_EQ(std::cv_status::no_timeout, status);
+        ++tries;
+        ASSERT_LT(tries, 10);
     } while (!mExecuted);
 }
 
@@ -69,15 +72,15 @@ TEST_F(TimerQueueTest, Remove) {
 
     const auto executionTime = elapsedRealtimeNano() + 50'000'000; // 50 ms
 
-    auto handle = tq.add([this]() {
+    auto id = tq.add([this]() {
         std::lock_guard lock(mMutex);
         mExecuted = true;
         mCv.notify_one();
     }, executionTime);
 
-    ASSERT_NE(handle, TimerQueue::INVALID_HANDLE);
+    ASSERT_NE(id, TimerQueue::INVALID_EVENT_ID);
 
-    bool removed = tq.remove(handle);
+    bool removed = tq.remove(id);
     ASSERT_TRUE(removed);
 
     audio_utils::unique_lock ul(mMutex);
@@ -151,18 +154,97 @@ TEST_F(TimerQueueTest, Destructor) {
     EXPECT_FALSE(mExecuted);
 }
 
-TEST_F(TimerQueueTest, RemoveInvalidHandle) {
+TEST_F(TimerQueueTest, RemoveInvalidEventId) {
     TimerQueue tq;
     ASSERT_TRUE(tq.ready());
     EXPECT_FALSE(tq.remove(12345));
-    EXPECT_FALSE(tq.remove(TimerQueue::INVALID_HANDLE));
+    EXPECT_FALSE(tq.remove(TimerQueue::INVALID_EVENT_ID));
 }
 
 TEST_F(TimerQueueTest, AddNullFunction) {
     TimerQueue tq;
     ASSERT_TRUE(tq.ready());
-    const auto handle = tq.add(nullptr, elapsedRealtimeNano() + 10'000'000);
-    EXPECT_EQ(handle, TimerQueue::INVALID_HANDLE);
+    const auto id = tq.add(nullptr, elapsedRealtimeNano() + 10'000'000);
+    EXPECT_EQ(id, TimerQueue::INVALID_EVENT_ID);
+}
+
+TEST_F(TimerQueueTest, PriorityOrder) {
+    TimerQueue tq;
+
+    ASSERT_TRUE(tq.ready());
+
+    std::vector<size_t> executionOrder;
+
+    const auto now = elapsedRealtimeNano();
+    const auto deadline = now + 100'000'000; // 100ms
+    constexpr size_t kTasks = 8;
+
+    for (size_t priority = kTasks; priority >= 1; --priority) {
+        tq.add([&executionOrder, priority, this]() {
+            std::lock_guard lg(mMutex);
+            executionOrder.push_back(priority);
+            if (priority == 1) mCv.notify_one();
+        }, deadline, deadline, priority);
+    }
+
+    // Wait for the event to fire
+    {
+        std::unique_lock<std::mutex> ul(mMutex);
+        mCv.wait_for(ul, 200ms);
+    }
+
+    // Wait a bit longer for other events
+    std::this_thread::sleep_for(100ms);
+
+    std::lock_guard lg(mMutex);
+    ASSERT_EQ(kTasks, executionOrder.size());
+    for (size_t i = 0; i < kTasks; ++i) {
+       EXPECT_EQ(i + 1, executionOrder[i]);
+    }
+}
+
+class IClockTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        mClock = IClock::createLinuxClock();
+    }
+
+    std::unique_ptr<IClock> mClock;
+};
+
+TEST_F(IClockTest, CreateAndDestroy) {
+    ASSERT_TRUE(mClock->ready());
+    auto timer = mClock->createTimer(IClock::BOOTTIME);
+    ASSERT_NE(timer, IClock::INVALID_HANDLE);
+    ASSERT_EQ(OK, mClock->destroyTimer(timer));
+}
+
+TEST_F(IClockTest, SetAndWait) {
+    ASSERT_TRUE(mClock->ready());
+    auto timer = mClock->createTimer(IClock::BOOTTIME);
+    ASSERT_NE(timer, IClock::INVALID_HANDLE);
+
+    const auto executionTime = elapsedRealtimeNano() + 20'000'000; // 20 ms
+    ASSERT_EQ(OK, mClock->setTimer(timer, executionTime));
+
+    auto handle = mClock->wait(30'000'000);
+    ASSERT_EQ(timer, handle);
+
+    ASSERT_EQ(OK, mClock->destroyTimer(timer));
+}
+
+TEST_F(IClockTest, WaitTimeout) {
+    ASSERT_TRUE(mClock->ready());
+    auto timer = mClock->createTimer(IClock::BOOTTIME);
+    ASSERT_NE(timer, IClock::INVALID_HANDLE);
+
+    const auto executionTime = elapsedRealtimeNano() + 50'000'000; // 50 ms
+    ASSERT_EQ(OK, mClock->setTimer(timer, executionTime));
+
+    auto handle = mClock->wait(20'000'000);
+    ASSERT_EQ(IClock::PENDING_HANDLE, handle);
+
+    ASSERT_EQ(OK, mClock->destroyTimer(timer));
 }
 
 } // namespace android::audio_utils
