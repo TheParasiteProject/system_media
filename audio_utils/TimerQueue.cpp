@@ -20,6 +20,7 @@
 #include <audio_utils/TimerQueue.h>
 
 #include <algorithm>
+#include <audio_utils/Statistics.h>
 #include <log/log.h>
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
@@ -38,7 +39,7 @@ public:
     }
     ~LinuxClock() override {
         if (mPollHandle != INVALID_HANDLE) close(mPollHandle);
-        for (auto handle : mHandles) {
+        for (const auto& [handle, _] : mHandleInfos) {
             close(handle);
         }
     }
@@ -48,10 +49,27 @@ public:
     bool ready() const override { return mPollHandle != INVALID_HANDLE; }
     int setTimer(Handle handle, nsecs_t time) override;
     Handle wait(nsecs_t timeout) override;
+    std::string toString() const override {
+        std::string s;
+        for (const auto& [handle, info] : mHandleInfos) {
+            s.append("lastTime: ").append(std::to_string(info.lastTime))
+                .append(" delayed: ").append(std::to_string(info.delayed))
+                .append(" statistics(ms): ").append(info.statistics.toString())
+                .append("\n");
+        }
+        return s;
+    }
 
 protected:
+    static constexpr bool mVerboseLog = false;
+    static constexpr nsecs_t kDelayedWakeup = 100'000'000;
     const Handle mPollHandle;
-    std::set<Handle> mHandles;
+    struct HandleInfo {
+        nsecs_t lastTime{};
+        int64_t delayed{};
+        Statistics<double> statistics{0.99};
+    };
+    std::map<Handle, HandleInfo> mHandleInfos;
 };
 
 std::unique_ptr<IClock> IClock::createLinuxClock() {
@@ -89,12 +107,12 @@ IClock::Handle LinuxClock::createTimer(ClockType clockType) {
         close(fd);
         return INVALID_HANDLE;
     }
-    mHandles.emplace(fd);
+    mHandleInfos.try_emplace(fd, HandleInfo{});
     return fd;
 }
 
 status_t LinuxClock::destroyTimer(Handle handle) {
-    if (mHandles.erase(handle) == 0) return BAD_VALUE;
+    if (mHandleInfos.erase(handle) == 0) return BAD_VALUE;
     const int status = epoll_ctl(mPollHandle, EPOLL_CTL_DEL, handle, nullptr /* event */);
     return status == 0 ? OK : -errno;
 }
@@ -105,6 +123,9 @@ status_t LinuxClock::setTimer(Handle handle, nsecs_t time) {
     if (time > 0) {
         spec.it_value.tv_sec = time / 1'000'000'000;
         spec.it_value.tv_nsec = time % 1'000'000'000;
+        mHandleInfos[handle].lastTime = time;
+    } else {
+        mHandleInfos[handle].lastTime = kMagicUnblockTime;  // do not log.
     }
     const int ret = timerfd_settime(handle, TFD_TIMER_ABSTIME, &spec, nullptr);
     if (ret == 0) return OK;
@@ -117,9 +138,11 @@ IClock::Handle LinuxClock::wait(nsecs_t timeout) {
     int timeoutMs = (timeout > INT_MAX * 1'000'000LL) ? INT_MAX :
             (timeout < 0) ? -1 :
             timeout / 1'000'000;
-    const int n = epoll_wait(mPollHandle, &event, 1, timeoutMs);
+    const int n = epoll_wait(mPollHandle, &event, 1 /* maxevents */, timeoutMs);
     if (n < 0) {
-        ALOGE("%s: wait from poll handle %d failed: %s", __func__, mPollHandle, strerror(errno));
+        ALOGE_IF(errno != EINTR,
+                "%s: wait from poll handle %d failed: %s",
+                __func__, mPollHandle, strerror(errno));
         return errno == EINTR ? INTR_HANDLE : INVALID_HANDLE;
     }
     if (n == 0) {
@@ -134,6 +157,29 @@ IClock::Handle LinuxClock::wait(nsecs_t timeout) {
         ALOGE("%s: read from timer %d failed: %s", __func__, fd, strerror(errno));
         if (errno == EAGAIN || errno == EINTR) return PENDING_HANDLE;
         return INVALID_HANDLE;
+    }
+    const nsecs_t now = elapsedRealtimeNano();
+    if (mHandleInfos.count(fd) == 0) {
+        ALOGE("%s: trigger now %jd when mLastTime for fd %d doesn't exist",
+                __func__, now, fd);
+    } else {
+       auto& handleInfo = mHandleInfos[fd];
+       if (const auto lastTime = handleInfo.lastTime;
+               lastTime != kMagicUnblockTime) {
+            const auto diff = now - lastTime;
+            if (diff < 0) {
+                ALOGE("%s: trigger now %jd earlier %jd than mLastTime[%d] %jd",
+                        __func__, now, diff, fd, lastTime);
+            } else if (diff > kDelayedWakeup) {
+                ALOGW("%s: trigger now %jd later %jd than mLastTime[%d] %jd (threshold %lld)",
+                        __func__, now, diff, fd, lastTime, (long long)kDelayedWakeup);
+                ++handleInfo.delayed;
+            } else if (mVerboseLog) {
+                ALOGD("%s: trigger now %jd later %jd mLastTime[%d] %jd",
+                        __func__, now, diff, fd, lastTime);
+            }
+            handleInfo.statistics.add(diff * 1e-6); // msec
+        }
     }
     return fd;
 }
@@ -233,6 +279,13 @@ TimerQueue::EventId TimerQueue::getNextEventId_l() {
         ++mNextEventId;
     }
     return id;
+}
+
+std::string TimerQueue::toString() const {
+    std::string s{"TimerQueue\n"};
+    std::lock_guard lock(mMutex);
+    s.append(mClock->toString());
+    return s;
 }
 
 void TimerQueue::threadLoop() {
@@ -336,7 +389,7 @@ void TimerQueue::AlarmClock::armTimerForNextEvent() {
     nsecs_t nextTime = 0;
     if (!mRunning) {
         // Set a timer for 1 nanosecond to ensure it fires immediately and unblocks the read.
-        nextTime = 1;
+        nextTime = IClock::kMagicUnblockTime;
     } else if (!mTimeIndex.empty()) {
         nextTime = mTimeIndex.begin()->first;
     }
@@ -364,6 +417,5 @@ void TimerQueue::AlarmClock::removeEvents(const std::set<std::shared_ptr<Event>>
         remove(event->id);
     }
 }
-
 
 } // namespace android::audio_utils
