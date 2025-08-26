@@ -47,7 +47,10 @@ public:
     static constexpr Handle PENDING_HANDLE = -2;  // operation still pending, retry later
     static constexpr Handle INTR_HANDLE = -3;     // interrupt occurred, retry immediate
 
-    /**
+    // timer value of 1 nanosecond fires immediately and unblocks the read.
+    static constexpr nsecs_t kMagicUnblockTime = 1;
+
+  /**
      * The type of clock to use for a timer.
      */
     enum ClockType {
@@ -93,6 +96,8 @@ public:
      *         INTR_HANDLE on system interrupt, or INVALID_HANDLE on error.
      */
     virtual Handle wait(nsecs_t timeout) = 0;
+
+    virtual std::string toString() const = 0;
 
     /**
      * Creates a new LinuxClock instance.
@@ -212,6 +217,11 @@ public:
      */
     bool alarm() const { return mAlarm; }
 
+    /**
+     * Returns a string state status.
+     */
+    std::string toString() const;
+
 private:
     EventId getNextEventId_l() REQUIRES(mMutex);
     void threadLoop();
@@ -249,7 +259,7 @@ private:
 
     std::unique_ptr<IClock> mClock;
     const bool mAlarm;  // if true, in ALARM mode and will wake from suspend.
-    std::mutex mMutex;
+    mutable std::mutex mMutex;
     std::thread mThread;  // effectively const
     bool mRunning GUARDED_BY(mMutex) = false;
     EventId mNextEventId GUARDED_BY(mMutex) = 1;
